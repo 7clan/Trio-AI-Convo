@@ -1,0 +1,23 @@
+{
+  "name": "trio-convo-server",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Backend for Ollama duo chat with web search tools",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js"
+  },
+  "keywords": [
+    "ollama",
+    "express",
+    "search"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
