@@ -304,7 +304,13 @@ const searchWeb = async (query, primary, fallback) => {
   }
 }
 
-const callOllama = async ({ model, messages, temperature, host }) => {
+const callOllama = async ({
+  model,
+  messages,
+  temperature,
+  host,
+  timeoutMs = 120000,
+}) => {
   const baseUrl =
     host === 'cloud' ? 'https://ollama.com' : OLLAMA_BASE_URL
   const headers = { 'Content-Type': 'application/json' }
@@ -317,8 +323,10 @@ const callOllama = async ({ model, messages, temperature, host }) => {
     }
     headers.Authorization = `Bearer ${key}`
   }
-  try {
-    const res = await fetch(`${baseUrl}/api/chat`, {
+  const doFetch = async (url) => {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    const res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -327,15 +335,30 @@ const callOllama = async ({ model, messages, temperature, host }) => {
         stream: false,
         options: { temperature },
       }),
+      signal: controller.signal,
     })
+    clearTimeout(timeout)
     if (!res.ok) {
       const text = await res.text()
       throw new Error(`Ollama error ${res.status}: ${text}`)
     }
     return res.json()
+  }
+  try {
+    return await doFetch(`${baseUrl}/api/chat`)
   } catch (err) {
+    if (host === 'local' && baseUrl.includes('localhost')) {
+      try {
+        return await doFetch(`${baseUrl.replace('localhost', '127.0.0.1')}/api/chat`)
+      } catch (err2) {
+        throw new Error(
+          `Ollama local fetch failed (${baseUrl}): ${err2?.message || err2}`
+        )
+      }
+    }
+    const cause = err?.cause?.message ? ` | cause: ${err.cause.message}` : ''
     throw new Error(
-      `Ollama ${host} fetch failed (${baseUrl}): ${err?.message || err}`
+      `Ollama ${host} fetch failed (${baseUrl}): ${err?.message || err}${cause}`
     )
   }
 }
@@ -379,6 +402,10 @@ app.post('/api/chat', async (req, res) => {
   if (!model) return res.status(400).json({ error: 'Missing model' })
 
   const history = []
+  history.push({
+    role: 'system',
+    content: `Current date is ${new Date().toISOString().slice(0, 10)}. Use this for time references.`,
+  })
   if (systemPrompt) {
     history.push({ role: 'system', content: systemPrompt })
   }
@@ -402,12 +429,29 @@ app.post('/api/chat', async (req, res) => {
         messages: history,
         temperature,
         host,
+        timeoutMs: host === 'cloud' ? 60000 : 120000,
       })
       const content = lastResponse?.message?.content || ''
       const toolCall = toolsEnabled ? extractToolCall(content) : null
       if (!toolCall || step === maxToolSteps) {
         const finalPayload = extractFinalPayload(content)
         let finalText = finalPayload?.final ?? content
+        if (!finalText || !finalText.trim()) {
+          // one retry with a forced final response
+          const retryHistory = history.concat({
+            role: 'system',
+            content:
+              'Return a final answer now. Do not call tools. Do not return JSON.',
+          })
+          const retry = await callOllama({
+            model,
+            messages: retryHistory,
+            temperature,
+            host,
+            timeoutMs: host === 'cloud' ? 60000 : 120000,
+          })
+          finalText = retry?.message?.content || finalText
+        }
         if (!finalText || !finalText.trim()) {
           finalText = content?.trim() || 'No response from model.'
         }
@@ -422,42 +466,78 @@ app.post('/api/chat', async (req, res) => {
       }
       toolUsed = toolCall
       if (toolCall.tool === 'search') {
-        const search = await searchWeb(
-          toolCall.query,
-          searchProvider || process.env.SEARCH_PROVIDER,
-          searchFallback || process.env.SEARCH_FALLBACK
-        )
-        toolTrace = {
-          type: 'search',
-          provider: search.provider,
-          query: toolCall.query,
-          results: search.results,
+        try {
+          const search = await searchWeb(
+            toolCall.query,
+            searchProvider || process.env.SEARCH_PROVIDER,
+            searchFallback || process.env.SEARCH_FALLBACK
+          )
+          toolTrace = {
+            type: 'search',
+            provider: search.provider,
+            query: toolCall.query,
+            results: search.results,
+          }
+          history.push({ role: 'assistant', content })
+          history.push({
+            role: 'system',
+            content:
+              search.results && search.results.length > 0
+                ? `WebSearchResults (${search.provider}): ${JSON.stringify(
+                    search.results
+                  )}`
+                : `WebSearchResults (${search.provider}): [] (no results)`,
+          })
+        } catch (searchErr) {
+          toolTrace = {
+            type: 'search',
+            provider: searchProvider || 'auto',
+            query: toolCall.query,
+            results: [],
+            error: searchErr?.message || String(searchErr),
+          }
+          history.push({ role: 'assistant', content })
+          history.push({
+            role: 'system',
+            content: `WebSearchError: ${
+              searchErr?.message || String(searchErr)
+            }. Continue without web results.`,
+          })
         }
-        history.push({ role: 'assistant', content })
-        history.push({
-          role: 'system',
-          content:
-            search.results && search.results.length > 0
-              ? `WebSearchResults (${search.provider}): ${JSON.stringify(
-                  search.results
-                )}`
-              : `WebSearchResults (${search.provider}): [] (no results)`,
-        })
       } else if (toolCall.tool === 'fetch') {
-        const fetched = await fetchOllamaWeb(toolCall.url)
-        toolTrace = {
-          type: 'fetch',
-          provider: 'ollama',
-          url: toolCall.url,
-          title: fetched.title,
-          content: fetched.content,
-          links: fetched.links,
+        try {
+          const fetched = await fetchOllamaWeb(toolCall.url)
+          toolTrace = {
+            type: 'fetch',
+            provider: 'ollama',
+            url: toolCall.url,
+            title: fetched.title,
+            content: fetched.content,
+            links: fetched.links,
+          }
+          history.push({ role: 'assistant', content })
+          history.push({
+            role: 'system',
+            content: `WebFetch (${toolCall.url}): ${JSON.stringify(fetched)}`,
+          })
+        } catch (fetchErr) {
+          toolTrace = {
+            type: 'fetch',
+            provider: 'ollama',
+            url: toolCall.url,
+            title: '',
+            content: '',
+            links: [],
+            error: fetchErr?.message || String(fetchErr),
+          }
+          history.push({ role: 'assistant', content })
+          history.push({
+            role: 'system',
+            content: `WebFetchError: ${
+              fetchErr?.message || String(fetchErr)
+            }. Continue without web fetch.`,
+          })
         }
-        history.push({ role: 'assistant', content })
-        history.push({
-          role: 'system',
-          content: `WebFetch (${toolCall.url}): ${JSON.stringify(fetched)}`,
-        })
       }
     }
     res.json({

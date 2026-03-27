@@ -18,6 +18,7 @@ type ToolTrace =
       provider: string
       query: string
       results: { title: string; url: string; snippet?: string }[]
+      error?: string
     }
   | {
       type: 'fetch'
@@ -26,6 +27,7 @@ type ToolTrace =
       title?: string
       content?: string
       links?: string[]
+      error?: string
     }
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
@@ -107,9 +109,11 @@ function App() {
   ) => {
     const controller = new AbortController()
     abortRef.current = controller
+    const trimmedHistory =
+      host === 'local' ? history.slice(-8) : history
     const payload = {
       model,
-      messages: buildOllamaMessages(history),
+      messages: buildOllamaMessages(trimmedHistory),
       systemPrompt,
       temperature,
       toolsEnabled,
@@ -308,6 +312,11 @@ function App() {
                       Provider: {msg.toolTrace.provider} • Query:{' '}
                       {msg.toolTrace.query}
                     </p>
+                    {msg.toolTrace.error && (
+                      <p className="evidence-snippet">
+                        Error: {msg.toolTrace.error}
+                      </p>
+                    )}
                     <div className="evidence-list">
                       {msg.toolTrace.results.map((item) => (
                         <div key={item.url} className="evidence-item">
@@ -328,6 +337,11 @@ function App() {
                       Provider: {msg.toolTrace.provider} • URL:{' '}
                       {msg.toolTrace.url}
                     </p>
+                    {msg.toolTrace.error && (
+                      <p className="evidence-snippet">
+                        Error: {msg.toolTrace.error}
+                      </p>
+                    )}
                     {msg.toolTrace.title && (
                       <p className="evidence-title">{msg.toolTrace.title}</p>
                     )}
