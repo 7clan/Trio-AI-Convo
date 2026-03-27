@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import './App.css'
 
-type Speaker = 'user' | 'ai1' | 'ai2' | 'system'
+type Speaker = 'user' | 'ai1' | 'ai2' | 'ai3' | 'system'
 
 type ChatMessage = {
   id: string
@@ -33,13 +33,17 @@ const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [ai1Model, setAi1Model] = useState('qwen3:4b')
+  const [ai1Model, setAi1Model] = useState('gpt-oss:120b-cloud')
   const [ai2Model, setAi2Model] = useState('gemma3:4b')
+  const [ai3Model, setAi3Model] = useState('qwen3:4b')
   const [ai1Prompt, setAi1Prompt] = useState(
-    'You are AI-1. Be direct, curious, and collaborative.'
+    'You are AI-1 running in the cloud. Be direct, curious, and collaborative.'
   )
   const [ai2Prompt, setAi2Prompt] = useState(
     'You are AI-2. Offer alternative angles and challenge assumptions.'
+  )
+  const [ai3Prompt, setAi3Prompt] = useState(
+    'You are AI-3 running locally. Be concise and pragmatic.'
   )
   const [temperature, setTemperature] = useState(0.6)
   const [toolsEnabled, setToolsEnabled] = useState(true)
@@ -48,11 +52,12 @@ function App() {
   const [rounds, setRounds] = useState(3)
   const [busy, setBusy] = useState(false)
   const [activeThinker, setActiveThinker] = useState<Speaker | null>(null)
-  const [workNotes, setWorkNotes] = useState({ ai1: '', ai2: '' })
+  const [workNotes, setWorkNotes] = useState({ ai1: '', ai2: '', ai3: '' })
   const [toolTraces, setToolTraces] = useState<{
     ai1: ToolTrace | null
     ai2: ToolTrace | null
-  }>({ ai1: null, ai2: null })
+    ai3: ToolTrace | null
+  }>({ ai1: null, ai2: null, ai3: null })
   const abortRef = useRef<AbortController | null>(null)
   const messagesRef = useRef<ChatMessage[]>([])
 
@@ -60,6 +65,7 @@ function App() {
     if (!busy) return 'Idle'
     if (activeThinker === 'ai1') return 'AI-1 thinking'
     if (activeThinker === 'ai2') return 'AI-2 thinking'
+    if (activeThinker === 'ai3') return 'AI-3 thinking'
     return 'Working'
   }, [busy, activeThinker])
 
@@ -96,7 +102,8 @@ function App() {
   const callModel = async (
     model: string,
     systemPrompt: string,
-    history: ChatMessage[]
+    history: ChatMessage[],
+    host: 'local' | 'cloud' = 'local'
   ) => {
     const controller = new AbortController()
     abortRef.current = controller
@@ -109,6 +116,7 @@ function App() {
       maxToolSteps: 2,
       searchProvider,
       searchFallback,
+      host,
     }
     const res = await fetch(`${API_BASE}/chat`, {
       method: 'POST',
@@ -140,7 +148,7 @@ function App() {
     setBusy(true)
     try {
       setActiveThinker('ai1')
-      const ai1 = await callModel(ai1Model, ai1Prompt, history)
+      const ai1 = await callModel(ai1Model, ai1Prompt, history, 'cloud')
       if (ai1.workNotes) {
         setWorkNotes((prev) => ({ ...prev, ai1: ai1.workNotes || '' }))
       }
@@ -154,14 +162,28 @@ function App() {
         ai1.toolTrace
       )
       setActiveThinker('ai2')
-      const ai2 = await callModel(ai2Model, ai2Prompt, historyAfterAi1)
+      const ai2 = await callModel(ai2Model, ai2Prompt, historyAfterAi1, 'local')
       if (ai2.workNotes) {
         setWorkNotes((prev) => ({ ...prev, ai2: ai2.workNotes || '' }))
       }
       if (ai2.toolTrace) {
         setToolTraces((prev) => ({ ...prev, ai2: ai2.toolTrace || null }))
       }
-      pushMessage('ai2', ai2.response, ai2.workNotes, ai2.toolTrace)
+      const historyAfterAi2 = pushMessage(
+        'ai2',
+        ai2.response,
+        ai2.workNotes,
+        ai2.toolTrace
+      )
+      setActiveThinker('ai3')
+      const ai3 = await callModel(ai3Model, ai3Prompt, historyAfterAi2, 'local')
+      if (ai3.workNotes) {
+        setWorkNotes((prev) => ({ ...prev, ai3: ai3.workNotes || '' }))
+      }
+      if (ai3.toolTrace) {
+        setToolTraces((prev) => ({ ...prev, ai3: ai3.toolTrace || null }))
+      }
+      pushMessage('ai3', ai3.response, ai3.workNotes, ai3.toolTrace)
     } catch (err) {
       pushMessage('system', `Error: ${err instanceof Error ? err.message : err}`)
     } finally {
@@ -178,7 +200,7 @@ function App() {
       let history = messagesRef.current
       for (let i = 0; i < rounds; i += 1) {
         setActiveThinker('ai1')
-        const ai1 = await callModel(ai1Model, ai1Prompt, history)
+        const ai1 = await callModel(ai1Model, ai1Prompt, history, 'cloud')
         if (ai1.workNotes) {
           setWorkNotes((prev) => ({ ...prev, ai1: ai1.workNotes || '' }))
         }
@@ -192,7 +214,7 @@ function App() {
           ai1.toolTrace
         )
         setActiveThinker('ai2')
-        const ai2 = await callModel(ai2Model, ai2Prompt, history)
+        const ai2 = await callModel(ai2Model, ai2Prompt, history, 'local')
         if (ai2.workNotes) {
           setWorkNotes((prev) => ({ ...prev, ai2: ai2.workNotes || '' }))
         }
@@ -204,6 +226,20 @@ function App() {
           ai2.response,
           ai2.workNotes,
           ai2.toolTrace
+        )
+        setActiveThinker('ai3')
+        const ai3 = await callModel(ai3Model, ai3Prompt, history, 'local')
+        if (ai3.workNotes) {
+          setWorkNotes((prev) => ({ ...prev, ai3: ai3.workNotes || '' }))
+        }
+        if (ai3.toolTrace) {
+          setToolTraces((prev) => ({ ...prev, ai3: ai3.toolTrace || null }))
+        }
+        history = pushMessage(
+          'ai3',
+          ai3.response,
+          ai3.workNotes,
+          ai3.toolTrace
         )
       }
     } catch (err) {
@@ -324,10 +360,10 @@ function App() {
             />
             <div className="composer-actions">
               <button onClick={handleSend} disabled={busy || !input.trim()}>
-                Send to both
+                Send to all
               </button>
               <button onClick={handleDuoLoop} disabled={busy}>
-                Run duo loop
+                Run trio loop
               </button>
               <button onClick={handleStop} className="ghost">
                 Stop
@@ -340,7 +376,7 @@ function App() {
           <div className="panel-section">
             <h2>Models</h2>
             <label>
-              AI-1 model
+              AI-1 model (cloud)
               <input
                 value={ai1Model}
                 onChange={(e) => setAi1Model(e.target.value)}
@@ -366,6 +402,21 @@ function App() {
               <textarea
                 value={ai2Prompt}
                 onChange={(e) => setAi2Prompt(e.target.value)}
+                rows={3}
+              />
+            </label>
+            <label>
+              AI-3 model (local)
+              <input
+                value={ai3Model}
+                onChange={(e) => setAi3Model(e.target.value)}
+              />
+            </label>
+            <label>
+              AI-3 system prompt
+              <textarea
+                value={ai3Prompt}
+                onChange={(e) => setAi3Prompt(e.target.value)}
                 rows={3}
               />
             </label>
@@ -420,6 +471,10 @@ function App() {
               <pre>{activeThinker === 'ai2' ? 'Thinking…' : workNotes.ai2 || '—'}</pre>
             </div>
             <div className="thinking-block">
+              <p className="thinking-title">AI-3 notes</p>
+              <pre>{activeThinker === 'ai3' ? 'Thinking…' : workNotes.ai3 || '—'}</pre>
+            </div>
+            <div className="thinking-block">
               <p className="thinking-title">AI-1 evidence</p>
               {toolTraces.ai1?.type === 'search' ? (
                 <div className="evidence-compact">
@@ -469,6 +524,34 @@ function App() {
                   </p>
                   {toolTraces.ai2.title && (
                     <p className="evidence-title">{toolTraces.ai2.title}</p>
+                  )}
+                </div>
+              ) : (
+                <p className="work-meta">—</p>
+              )}
+            </div>
+            <div className="thinking-block">
+              <p className="thinking-title">AI-3 evidence</p>
+              {toolTraces.ai3?.type === 'search' ? (
+                <div className="evidence-compact">
+                  <p className="work-meta">
+                    Provider: {toolTraces.ai3.provider} • Query:{' '}
+                    {toolTraces.ai3.query}
+                  </p>
+                  {toolTraces.ai3.results.map((item) => (
+                    <p key={item.url} className="evidence-title">
+                      {item.title}
+                    </p>
+                  ))}
+                </div>
+              ) : toolTraces.ai3?.type === 'fetch' ? (
+                <div className="evidence-compact">
+                  <p className="work-meta">
+                    Provider: {toolTraces.ai3.provider} • URL:{' '}
+                    {toolTraces.ai3.url}
+                  </p>
+                  {toolTraces.ai3.title && (
+                    <p className="evidence-title">{toolTraces.ai3.title}</p>
                   )}
                 </div>
               ) : (

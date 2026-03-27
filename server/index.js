@@ -289,38 +289,55 @@ const searchWeb = async (query, primary, fallback) => {
   const { primary: p, fallback: f } = pickProvider(primary, fallback)
   try {
     const results = await runSearchProvider(p, query)
-    if (results.length > 0) return { provider: p, results }
-    throw new Error('No results')
+    return { provider: p, results: results || [] }
   } catch (err) {
     if (err?.code === 'MISSING_KEY' && p !== 'duckduckgo') {
       // If a paid provider is missing a key, fall back to DuckDuckGo first.
       const results = await runSearchProvider('duckduckgo', query)
-      return { provider: 'duckduckgo', results }
+      return { provider: 'duckduckgo', results: results || [] }
     }
     if (f && f !== p) {
       const results = await runSearchProvider(f, query)
-      return { provider: f, results }
+      return { provider: f, results: results || [] }
     }
     throw err
   }
 }
 
-const callOllama = async ({ model, messages, temperature }) => {
-  const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: false,
-      options: { temperature },
-    }),
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Ollama error ${res.status}: ${text}`)
+const callOllama = async ({ model, messages, temperature, host }) => {
+  const baseUrl =
+    host === 'cloud' ? 'https://ollama.com' : OLLAMA_BASE_URL
+  const headers = { 'Content-Type': 'application/json' }
+  if (host === 'cloud') {
+    const key = process.env.OLLAMA_API_KEY
+    if (!key) {
+      const err = new Error('Missing OLLAMA_API_KEY')
+      err.code = 'MISSING_KEY'
+      throw err
+    }
+    headers.Authorization = `Bearer ${key}`
   }
-  return res.json()
+  try {
+    const res = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        options: { temperature },
+      }),
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`Ollama error ${res.status}: ${text}`)
+    }
+    return res.json()
+  } catch (err) {
+    throw new Error(
+      `Ollama ${host} fetch failed (${baseUrl}): ${err?.message || err}`
+    )
+  }
 }
 
 app.get('/api/health', (_req, res) => {
@@ -356,6 +373,7 @@ app.post('/api/chat', async (req, res) => {
     maxToolSteps = 2,
     searchProvider,
     searchFallback,
+    host = 'local',
   } = req.body || {}
 
   if (!model) return res.status(400).json({ error: 'Missing model' })
@@ -379,7 +397,12 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     for (let step = 0; step <= maxToolSteps; step += 1) {
-      lastResponse = await callOllama({ model, messages: history, temperature })
+      lastResponse = await callOllama({
+        model,
+        messages: history,
+        temperature,
+        host,
+      })
       const content = lastResponse?.message?.content || ''
       const toolCall = toolsEnabled ? extractToolCall(content) : null
       if (!toolCall || step === maxToolSteps) {
@@ -413,9 +436,12 @@ app.post('/api/chat', async (req, res) => {
         history.push({ role: 'assistant', content })
         history.push({
           role: 'system',
-          content: `WebSearchResults (${search.provider}): ${JSON.stringify(
-            search.results
-          )}`,
+          content:
+            search.results && search.results.length > 0
+              ? `WebSearchResults (${search.provider}): ${JSON.stringify(
+                  search.results
+                )}`
+              : `WebSearchResults (${search.provider}): [] (no results)`,
         })
       } else if (toolCall.tool === 'fetch') {
         const fetched = await fetchOllamaWeb(toolCall.url)
